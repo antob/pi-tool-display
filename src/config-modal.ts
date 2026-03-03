@@ -9,11 +9,7 @@ import {
 	TOOL_DISPLAY_PRESETS,
 	type ToolDisplayPreset,
 } from "./presets.js";
-import {
-	BUILT_IN_TOOL_OVERRIDE_NAMES,
-	type BuiltInToolOverrideName,
-	type ToolDisplayConfig,
-} from "./types.js";
+import { type ToolDisplayConfig } from "./types.js";
 
 interface ToolDisplayConfigController {
 	getConfig(): ToolDisplayConfig;
@@ -25,22 +21,20 @@ interface SettingValueSyncTarget {
 	updateValue(id: string, value: string): void;
 }
 
+interface ModalOverlayOptions {
+	anchor: "center";
+	width: number;
+	maxHeight: number;
+	margin: number;
+}
+
 const PREVIEW_LINE_VALUES = ["4", "8", "12", "20", "40"];
-const EXPANDED_PREVIEW_MAX_LINE_VALUES = ["500", "1000", "2000", "4000", "8000", "12000", "20000"];
 const BASH_PREVIEW_LINE_VALUES = ["0", "5", "10", "20", "40"];
-const DIFF_SPLIT_MIN_WIDTH_VALUES = ["90", "100", "120", "140", "160"];
-const DIFF_COLLAPSED_LINE_VALUES = ["8", "16", "24", "40", "80"];
 const PRESET_COMMAND_HINT = TOOL_DISPLAY_PRESETS.join("|");
 
-const TOOL_OVERRIDE_SETTING_IDS: Record<BuiltInToolOverrideName, string> = {
-	read: "registerToolOverrides.read",
-	grep: "registerToolOverrides.grep",
-	find: "registerToolOverrides.find",
-	ls: "registerToolOverrides.ls",
-	bash: "registerToolOverrides.bash",
-	edit: "registerToolOverrides.edit",
-	write: "registerToolOverrides.write",
-};
+const MANUAL_CONFIG_PATH_HINT = "~/.pi/agent/extensions/pi-tool-display/config.json";
+const MANUAL_CONFIG_MODAL_HINT =
+	"Advanced options (tool ownership, diff fine-tuning, truncation/RTK hints) are available in config.json.";
 
 function toOnOff(value: boolean): string {
 	return value ? "on" : "off";
@@ -87,60 +81,6 @@ function parseNumber(value: string, fallback: number): number {
 	return Number.isNaN(parsed) ? fallback : parsed;
 }
 
-function buildToolOwnershipSettings(config: ToolDisplayConfig): SettingItem[] {
-	return [
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.read,
-			label: "Own read tool override",
-			description: "on = pi-tool-display owns read, off = leave read for another extension (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.read),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.grep,
-			label: "Own grep tool override",
-			description: "on = pi-tool-display owns grep (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.grep),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.find,
-			label: "Own find tool override",
-			description: "on = pi-tool-display owns find (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.find),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.ls,
-			label: "Own ls tool override",
-			description: "on = pi-tool-display owns ls (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.ls),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.bash,
-			label: "Own bash tool override",
-			description: "on = pi-tool-display owns bash (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.bash),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.edit,
-			label: "Own edit tool override",
-			description: "on = pi-tool-display owns edit (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.edit),
-			values: ["on", "off"],
-		},
-		{
-			id: TOOL_OVERRIDE_SETTING_IDS.write,
-			label: "Own write tool override",
-			description: "on = pi-tool-display owns write (applies after /reload)",
-			currentValue: toOnOff(config.registerToolOverrides.write),
-			values: ["on", "off"],
-		},
-	];
-}
-
 function buildSettingItems(
 	config: ToolDisplayConfig,
 	capabilities: ToolDisplayCapabilities,
@@ -157,34 +97,15 @@ function buildSettingItems(
 			]
 		: [];
 
-	const rtkSettings: SettingItem[] = capabilities.hasRtkOptimizer
-		? [
-				{
-					id: "showRtkCompactionHints",
-					label: "Show RTK compaction hints",
-					description: "Shows RTK compaction labels (including summary suffix text)",
-					currentValue: toOnOff(config.showRtkCompactionHints),
-					values: ["on", "off"],
-				},
-			]
-		: [];
-
 	return [
 		{
 			id: "preset",
 			label: "Preset profile",
-			description: "opencode = strict inline-only, balanced = compact summaries, verbose = line previews",
+			description:
+				"Start here. opencode = strict inline-only, balanced = compact summaries, verbose = line previews",
 			currentValue: detectToolDisplayPreset(config),
 			values: [...TOOL_DISPLAY_PRESETS],
 		},
-		{
-			id: "enableNativeUserMessageBox",
-			label: "Native user message box",
-			description: "on = render user prompts in bordered box, off = use default Pi user message rendering",
-			currentValue: toOnOff(config.enableNativeUserMessageBox),
-			values: ["on", "off"],
-		},
-		...buildToolOwnershipSettings(config),
 		{
 			id: "readOutputMode",
 			label: "Read tool output",
@@ -208,13 +129,6 @@ function buildSettingItems(
 			values: PREVIEW_LINE_VALUES,
 		},
 		{
-			id: "expandedPreviewMaxLines",
-			label: "Expanded max lines (Ctrl+O)",
-			description: "Safety ceiling for expanded read/search/MCP output rendering",
-			currentValue: String(config.expandedPreviewMaxLines),
-			values: EXPANDED_PREVIEW_MAX_LINE_VALUES,
-		},
-		{
 			id: "bashCollapsedLines",
 			label: "Bash collapsed lines",
 			description: "OpenCode default is 10; set 0 to hide bash output when collapsed",
@@ -229,63 +143,17 @@ function buildSettingItems(
 			values: ["auto", "split", "unified"],
 		},
 		{
-			id: "diffSplitMinWidth",
-			label: "Diff split min width",
-			description: "Minimum terminal width required before side-by-side diff is used",
-			currentValue: String(config.diffSplitMinWidth),
-			values: DIFF_SPLIT_MIN_WIDTH_VALUES,
-		},
-		{
-			id: "diffCollapsedLines",
-			label: "Diff collapsed lines",
-			description: "Maximum diff lines shown before expand (Ctrl+O)",
-			currentValue: String(config.diffCollapsedLines),
-			values: DIFF_COLLAPSED_LINE_VALUES,
-		},
-		{
-			id: "diffWordWrap",
-			label: "Diff word wrap",
-			description: "Wrap long diff lines instead of clipping them",
-			currentValue: toOnOff(config.diffWordWrap),
+			id: "enableNativeUserMessageBox",
+			label: "Native user message box",
+			description: "on = render user prompts in bordered box, off = use default Pi user message rendering",
+			currentValue: toOnOff(config.enableNativeUserMessageBox),
 			values: ["on", "off"],
 		},
-		{
-			id: "showTruncationHints",
-			label: "Show truncation hints",
-			description: "Shows notices when backend line/byte truncation happens",
-			currentValue: toOnOff(config.showTruncationHints),
-			values: ["on", "off"],
-		},
-		...rtkSettings,
 	];
 }
 
 function applyPreset(preset: ToolDisplayPreset): ToolDisplayConfig {
 	return getToolDisplayPresetConfig(preset);
-}
-
-function parseToolOverrideSettingId(id: string): BuiltInToolOverrideName | undefined {
-	for (const toolName of BUILT_IN_TOOL_OVERRIDE_NAMES) {
-		if (TOOL_OVERRIDE_SETTING_IDS[toolName] === id) {
-			return toolName;
-		}
-	}
-	return undefined;
-}
-
-function withToolOverride(
-	config: ToolDisplayConfig,
-	toolName: BuiltInToolOverrideName,
-	enabled: boolean,
-): ToolDisplayConfig {
-	const registerToolOverrides: ToolDisplayConfig["registerToolOverrides"] = {
-		...config.registerToolOverrides,
-		[toolName]: enabled,
-	};
-	return {
-		...config,
-		registerToolOverrides,
-	};
 }
 
 function applySetting(config: ToolDisplayConfig, id: string, value: string): ToolDisplayConfig {
@@ -319,11 +187,6 @@ function applySetting(config: ToolDisplayConfig, id: string, value: string): Too
 				...config,
 				previewLines: parseNumber(value, config.previewLines),
 			};
-		case "expandedPreviewMaxLines":
-			return {
-				...config,
-				expandedPreviewMaxLines: parseNumber(value, config.expandedPreviewMaxLines),
-			};
 		case "bashCollapsedLines":
 			return {
 				...config,
@@ -334,38 +197,8 @@ function applySetting(config: ToolDisplayConfig, id: string, value: string): Too
 				...config,
 				diffViewMode: value as ToolDisplayConfig["diffViewMode"],
 			};
-		case "diffSplitMinWidth":
-			return {
-				...config,
-				diffSplitMinWidth: parseNumber(value, config.diffSplitMinWidth),
-			};
-		case "diffCollapsedLines":
-			return {
-				...config,
-				diffCollapsedLines: parseNumber(value, config.diffCollapsedLines),
-			};
-		case "diffWordWrap":
-			return {
-				...config,
-				diffWordWrap: value === "on",
-			};
-		case "showTruncationHints":
-			return {
-				...config,
-				showTruncationHints: value === "on",
-			};
-		case "showRtkCompactionHints":
-			return {
-				...config,
-				showRtkCompactionHints: value === "on",
-			};
-		default: {
-			const toolName = parseToolOverrideSettingId(id);
-			if (toolName) {
-				return withToolOverride(config, toolName, value === "on");
-			}
+		default:
 			return config;
-		}
 	}
 }
 
@@ -375,30 +208,46 @@ function syncSettingValues(
 	capabilities: ToolDisplayCapabilities,
 ): void {
 	settingsList.updateValue("preset", detectToolDisplayPreset(config));
-	settingsList.updateValue("enableNativeUserMessageBox", toOnOff(config.enableNativeUserMessageBox));
-	for (const toolName of BUILT_IN_TOOL_OVERRIDE_NAMES) {
-		settingsList.updateValue(TOOL_OVERRIDE_SETTING_IDS[toolName], toOnOff(config.registerToolOverrides[toolName]));
-	}
 	settingsList.updateValue("readOutputMode", config.readOutputMode);
 	settingsList.updateValue("searchOutputMode", config.searchOutputMode);
 	if (capabilities.hasMcpTooling) {
 		settingsList.updateValue("mcpOutputMode", config.mcpOutputMode);
 	}
 	settingsList.updateValue("previewLines", String(config.previewLines));
-	settingsList.updateValue("expandedPreviewMaxLines", String(config.expandedPreviewMaxLines));
 	settingsList.updateValue("bashCollapsedLines", String(config.bashCollapsedLines));
 	settingsList.updateValue("diffViewMode", config.diffViewMode);
-	settingsList.updateValue("diffSplitMinWidth", String(config.diffSplitMinWidth));
-	settingsList.updateValue("diffCollapsedLines", String(config.diffCollapsedLines));
-	settingsList.updateValue("diffWordWrap", toOnOff(config.diffWordWrap));
-	settingsList.updateValue("showTruncationHints", toOnOff(config.showTruncationHints));
-	if (capabilities.hasRtkOptimizer) {
-		settingsList.updateValue("showRtkCompactionHints", toOnOff(config.showRtkCompactionHints));
-	}
+	settingsList.updateValue("enableNativeUserMessageBox", toOnOff(config.enableNativeUserMessageBox));
+}
+
+function resolveResponsiveOverlayOptions(): ModalOverlayOptions {
+	const terminalWidth =
+		typeof process.stdout.columns === "number" && Number.isFinite(process.stdout.columns)
+			? process.stdout.columns
+			: 120;
+	const terminalHeight =
+		typeof process.stdout.rows === "number" && Number.isFinite(process.stdout.rows)
+			? process.stdout.rows
+			: 36;
+
+	const margin = 1;
+	const availableWidth = Math.max(24, terminalWidth - margin * 2);
+	const preferredWidth = terminalWidth >= 140 ? 88 : terminalWidth >= 110 ? 82 : 76;
+	const width = Math.max(24, Math.min(preferredWidth, availableWidth));
+
+	const availableHeight = Math.max(10, terminalHeight - margin * 2);
+	const preferredHeight = Math.max(10, Math.floor(terminalHeight * 0.8));
+	const maxHeight = Math.min(preferredHeight, availableHeight);
+
+	return {
+		anchor: "center",
+		width,
+		maxHeight,
+		margin,
+	};
 }
 
 async function openSettingsModal(ctx: ExtensionCommandContext, controller: ToolDisplayConfigController): Promise<void> {
-	const overlayOptions = { anchor: "center" as const, width: 76, maxHeight: "80%" as const, margin: 1 };
+	const overlayOptions = resolveResponsiveOverlayOptions();
 	const capabilities = controller.getCapabilities();
 
 	await ctx.ui.custom<void>(
@@ -408,8 +257,8 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: ToolD
 
 			settingsModal = new ZellijSettingsModal(
 				{
-					title: "Tool Display Settings",
-					description: "OpenCode-style tool output behavior for pi",
+					title: "Pi Tool Display Settings",
+					description: `Core controls for day-to-day output tuning. ${MANUAL_CONFIG_MODAL_HINT}`,
 					settings: buildSettingItems(current, capabilities),
 					onChange: (id, newValue) => {
 						current = applySetting(current, id, newValue);
@@ -420,7 +269,7 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: ToolD
 						}
 					},
 					onClose: () => done(),
-					helpText: `/tool-display preset ${PRESET_COMMAND_HINT} • /tool-display show`,
+					helpText: `/tool-display preset ${PRESET_COMMAND_HINT} • advanced: edit ${MANUAL_CONFIG_PATH_HINT} • /tool-display show`,
 					enableSearch: true,
 				},
 				theme,
@@ -431,11 +280,11 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: ToolD
 				{
 					borderStyle: "rounded",
 					titleBar: {
-						left: "Tool Display Settings",
+						left: "Pi Tool Display Settings",
 						right: "pi-tool-display",
 					},
 					helpUndertitle: {
-						text: "Esc: close | ↑↓: navigate | Space: toggle",
+						text: "Esc close | ↑↓ navigate | Space toggle",
 						color: "dim",
 					},
 					overlay: overlayOptions,
