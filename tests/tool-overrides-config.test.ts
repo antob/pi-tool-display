@@ -4,11 +4,27 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerToolDisplayOverrides } from "../src/tool-overrides.ts";
 import { DEFAULT_TOOL_DISPLAY_CONFIG, type ToolDisplayConfig } from "../src/types.ts";
 
+interface RenderThemeLike {
+	fg(color: string, value: string): string;
+	bold(value: string): string;
+}
+
+interface RenderComponentLike {
+	render(width: number): string[];
+}
+
+interface RenderCallContextLike {
+	lastComponent?: unknown;
+	state?: Record<string, unknown>;
+	invalidate(): void;
+	executionStarted: boolean;
+	isPartial: boolean;
+}
+
 interface RegisteredToolLike {
 	name: string;
-	renderResult?: (result: unknown, options: unknown, theme: unknown) => {
-		render(width: number): string[];
-	};
+	renderCall?: (args: unknown, theme: RenderThemeLike, context: RenderCallContextLike) => RenderComponentLike;
+	renderResult?: (result: unknown, options: unknown, theme: unknown) => RenderComponentLike;
 }
 
 interface ToolEventHandlers {
@@ -49,24 +65,67 @@ function createExtensionApiStub(allTools: unknown[] = []): {
 	return { api, registeredTools, eventHandlers };
 }
 
-function renderToolResult(
-	tool: RegisteredToolLike | undefined,
-	input: string | { text: string; details?: unknown; expanded?: boolean; isPartial?: boolean },
-): string {
-	assert.ok(tool?.renderResult, `expected renderResult for tool '${tool?.name ?? "unknown"}'`);
-	const theme = {
+function createTheme(): RenderThemeLike {
+	return {
 		fg: (_color: string, value: string): string => value,
 		bold: (value: string): string => value,
 	};
-	const payload = typeof input === "string" ? { text: input } : input;
-	return tool.renderResult(
-		{ content: [{ type: "text", text: payload.text }], details: payload.details ?? {} },
-		{ isPartial: payload.isPartial ?? false, expanded: payload.expanded ?? false },
-		theme,
-	)
+}
+
+function normalizeRenderedText(component: RenderComponentLike): string {
+	return component
 		.render(120)
+		.map((line) => line.trimEnd())
 		.join("\n")
 		.trim();
+}
+
+function renderToolResult(
+	tool: RegisteredToolLike | undefined,
+	input:
+		| string
+		| {
+				text: string;
+				details?: unknown;
+				expanded?: boolean;
+				isPartial?: boolean;
+				isError?: boolean;
+		  },
+): string {
+	assert.ok(tool?.renderResult, `expected renderResult for tool '${tool?.name ?? "unknown"}'`);
+	const payload = typeof input === "string" ? { text: input } : input;
+	return normalizeRenderedText(
+		tool.renderResult(
+			{
+				content: [{ type: "text", text: payload.text }],
+				details: payload.details ?? {},
+				isError: payload.isError ?? false,
+			},
+			{ isPartial: payload.isPartial ?? false, expanded: payload.expanded ?? false },
+			createTheme(),
+		),
+	);
+}
+
+function renderToolCall(
+	tool: RegisteredToolLike | undefined,
+	args: { command: string; timeout?: number },
+	contextOverrides: Partial<RenderCallContextLike> = {},
+): { output: string; component: RenderComponentLike; context: RenderCallContextLike } {
+	assert.ok(tool?.renderCall, `expected renderCall for tool '${tool?.name ?? "unknown"}'`);
+	const context: RenderCallContextLike = {
+		lastComponent: contextOverrides.lastComponent,
+		state: contextOverrides.state ?? {},
+		invalidate: contextOverrides.invalidate ?? (() => {}),
+		executionStarted: contextOverrides.executionStarted ?? false,
+		isPartial: contextOverrides.isPartial ?? false,
+	};
+	const component = tool.renderCall(args, createTheme(), context);
+	return {
+		output: normalizeRenderedText(component),
+		component,
+		context,
+	};
 }
 
 test("current local-style config keeps read/search/MCP output modes distinct", async () => {
@@ -294,5 +353,157 @@ test("showRtkCompactionHints stays independent from showTruncationHints for prev
 			details: rtkDetails,
 		}),
 		/compacted by RTK: trimmed context • 1\/10 lines kept/,
+	);
+});
+
+test("bash output modes stay distinct across opencode, summary, and preview", () => {
+	const output = "alpha\nbeta\ngamma\n";
+
+	const opencodeConfig = buildConfig({
+		bashOutputMode: "opencode",
+		bashCollapsedLines: 1,
+	});
+	const opencodeStub = createExtensionApiStub();
+	registerToolDisplayOverrides(opencodeStub.api, () => opencodeConfig);
+	assert.equal(
+		renderToolResult(opencodeStub.registeredTools.find((tool) => tool.name === "bash"), output),
+		"alpha\n... (2 more lines • Ctrl+O to expand)",
+	);
+
+	const summaryConfig = buildConfig({
+		bashOutputMode: "summary",
+		bashCollapsedLines: 1,
+	});
+	const summaryStub = createExtensionApiStub();
+	registerToolDisplayOverrides(summaryStub.api, () => summaryConfig);
+	assert.equal(
+		renderToolResult(summaryStub.registeredTools.find((tool) => tool.name === "bash"), output),
+		"↳ 3 lines returned",
+	);
+
+	const previewConfig = buildConfig({
+		bashOutputMode: "preview",
+		previewLines: 2,
+		bashCollapsedLines: 1,
+	});
+	const previewStub = createExtensionApiStub();
+	registerToolDisplayOverrides(previewStub.api, () => previewConfig);
+	assert.equal(
+		renderToolResult(previewStub.registeredTools.find((tool) => tool.name === "bash"), output),
+		"alpha\nbeta\n... (1 more line • Ctrl+O to expand)",
+	);
+});
+
+test("bash call spinner appears only while execution is active", async () => {
+	const config = buildConfig({
+		bashOutputMode: "summary",
+	});
+	const { api, registeredTools } = createExtensionApiStub();
+	registerToolDisplayOverrides(api, () => config);
+
+	const bashTool = registeredTools.find((tool) => tool.name === "bash");
+	const idle = renderToolCall(bashTool, { command: "npm test" });
+	assert.equal(idle.output, "$ npm test");
+
+	let invalidateCount = 0;
+	const running = renderToolCall(
+		bashTool,
+		{ command: "npm test" },
+		{
+			state: {},
+			executionStarted: true,
+			isPartial: true,
+			invalidate: () => {
+				invalidateCount++;
+			},
+		},
+	);
+	assert.match(running.output, /^⠋ \$ npm test · 0s$/);
+
+	await new Promise((resolve) => setTimeout(resolve, 95));
+	const animatedFrame = normalizeRenderedText(running.component);
+	assert.notEqual(animatedFrame, running.output);
+	assert.match(animatedFrame, /^⠙ \$ npm test · 0s$/);
+	assert.ok(invalidateCount > 0);
+
+	const complete = renderToolCall(
+		bashTool,
+		{ command: "npm test" },
+		{
+			state: running.context.state,
+			lastComponent: running.component,
+			executionStarted: true,
+			isPartial: false,
+		},
+	);
+	assert.equal(complete.output, "$ npm test");
+});
+
+test("bash render keeps the running result area empty until output exists", () => {
+	const config = buildConfig({
+		bashOutputMode: "summary",
+	});
+	const { api, registeredTools } = createExtensionApiStub();
+	registerToolDisplayOverrides(api, () => config);
+
+	const bashTool = registeredTools.find((tool) => tool.name === "bash");
+	assert.equal(
+		renderToolResult(bashTool, { text: "", isPartial: true }),
+		"",
+	);
+});
+
+test("bash render shows live partial output once streaming begins", () => {
+	const config = buildConfig({
+		bashOutputMode: "summary",
+		previewLines: 2,
+	});
+	const { api, registeredTools } = createExtensionApiStub();
+	registerToolDisplayOverrides(api, () => config);
+
+	const bashTool = registeredTools.find((tool) => tool.name === "bash");
+	assert.equal(
+		renderToolResult(bashTool, {
+			text: "alpha\nbeta\ngamma\n",
+			isPartial: true,
+		}),
+		"alpha\nbeta\n... (1 more line • Ctrl+O to expand)",
+	);
+});
+
+test("bash live partial output respects opencode collapse settings", () => {
+	const config = buildConfig({
+		bashOutputMode: "opencode",
+		bashCollapsedLines: 1,
+		previewLines: 4,
+	});
+	const { api, registeredTools } = createExtensionApiStub();
+	registerToolDisplayOverrides(api, () => config);
+
+	const bashTool = registeredTools.find((tool) => tool.name === "bash");
+	assert.equal(
+		renderToolResult(bashTool, {
+			text: "alpha\nbeta\ngamma\n",
+			isPartial: true,
+		}),
+		"alpha\n... (2 more lines • Ctrl+O to expand)",
+	);
+});
+
+test("bash errors render with an explicit failure header and preview", () => {
+	const config = buildConfig({
+		bashOutputMode: "summary",
+		previewLines: 2,
+	});
+	const { api, registeredTools } = createExtensionApiStub();
+	registerToolDisplayOverrides(api, () => config);
+
+	const bashTool = registeredTools.find((tool) => tool.name === "bash");
+	assert.equal(
+		renderToolResult(bashTool, {
+			text: "npm ERR! missing script: test\nSee npm help run-script\n",
+			isError: true,
+		}),
+		"↳ command failed\nnpm ERR! missing script: test\nSee npm help run-script",
 	);
 });

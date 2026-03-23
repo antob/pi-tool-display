@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type { SettingItem } from "@mariozechner/pi-tui";
-import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.js";
+import { ZellijModal } from "./zellij-modal.js";
 import type { ToolDisplayCapabilities } from "./capabilities.js";
+import { getToolDisplayConfigPath } from "./config-store.js";
 import {
 	detectToolDisplayPreset,
 	getToolDisplayPresetConfig,
@@ -9,16 +9,14 @@ import {
 	TOOL_DISPLAY_PRESETS,
 	type ToolDisplayPreset,
 } from "./presets.js";
+import { shortenPath } from "./render-utils.js";
+import { SplitPaneInspectorModal, type InspectorSettingItem } from "./settings-inspector-modal.js";
 import { type ToolDisplayConfig } from "./types.js";
 
 interface ToolDisplayConfigController {
 	getConfig(): ToolDisplayConfig;
 	setConfig(next: ToolDisplayConfig, ctx: ExtensionCommandContext): void;
 	getCapabilities(): ToolDisplayCapabilities;
-}
-
-interface SettingValueSyncTarget {
-	updateValue(id: string, value: string): void;
 }
 
 interface ModalOverlayOptions {
@@ -28,13 +26,9 @@ interface ModalOverlayOptions {
 	margin: number;
 }
 
-const PREVIEW_LINE_VALUES = ["4", "8", "12", "20", "40"];
-const BASH_PREVIEW_LINE_VALUES = ["0", "5", "10", "20", "40"];
+const PREVIEW_LINE_VALUES = ["4", "8", "12", "20", "40"] as const;
+const BASH_PREVIEW_LINE_VALUES = ["0", "5", "10", "20", "40"] as const;
 const PRESET_COMMAND_HINT = TOOL_DISPLAY_PRESETS.join("|");
-
-const MANUAL_CONFIG_PATH_HINT = "~/.pi/agent/extensions/pi-tool-display/config.json";
-const MANUAL_CONFIG_MODAL_HINT =
-	"Advanced options (tool ownership, diff fine-tuning, truncation/RTK hints) are available in config.json.";
 
 function toOnOff(value: boolean): string {
 	return value ? "on" : "off";
@@ -55,7 +49,8 @@ function summarizeConfig(config: ToolDisplayConfig, capabilities: ToolDisplayCap
 		`search=${config.searchOutputMode}`,
 		`preview=${config.previewLines}`,
 		`expandedMax=${config.expandedPreviewMaxLines}`,
-		`bash=${config.bashCollapsedLines}`,
+		`bash=${config.bashOutputMode}`,
+		`bashLines=${config.bashCollapsedLines}`,
 		`diff=${config.diffViewMode}@${config.diffSplitMinWidth}`,
 		`diffLines=${config.diffCollapsedLines}`,
 		`diffWrap=${toOnOff(config.diffWordWrap)}`,
@@ -81,75 +76,222 @@ function parseNumber(value: string, fallback: number): number {
 	return Number.isNaN(parsed) ? fallback : parsed;
 }
 
-function buildSettingItems(
+function buildAdvancedNotes(
 	config: ToolDisplayConfig,
 	capabilities: ToolDisplayCapabilities,
-): SettingItem[] {
-	const mcpSettings: SettingItem[] = capabilities.hasMcpTooling
-		? [
-				{
-					id: "mcpOutputMode",
-					label: "MCP tool output",
-					description: "hidden = call only, summary = line count, preview = show lines",
-					currentValue: config.mcpOutputMode,
-					values: ["hidden", "summary", "preview"],
-				},
-			]
-		: [];
+	extra: readonly string[],
+): string[] {
+	const notes = [
+		...extra,
+		"Manual JSON edits also expose registerToolOverrides.*, expandedPreviewMaxLines, diffSplitMinWidth, diffCollapsedLines, and diffWordWrap.",
+		`Tool ownership is currently ${toolOwnershipSummary(config)} and still applies after /reload.`,
+		`Truncation hints are ${toOnOff(config.showTruncationHints)}${capabilities.hasRtkOptimizer ? `; RTK hints are ${toOnOff(config.showRtkCompactionHints)}.` : "."}`,
+	];
+	return notes;
+}
 
-	return [
+function buildInspectorSettings(
+	config: ToolDisplayConfig,
+	capabilities: ToolDisplayCapabilities,
+): InspectorSettingItem[] {
+	const configPath = shortenPath(getToolDisplayConfigPath());
+	const items: InspectorSettingItem[] = [
 		{
 			id: "preset",
 			label: "Preset profile",
-			description:
-				"Start here. opencode = strict inline-only, balanced = compact summaries, verbose = line previews",
 			currentValue: detectToolDisplayPreset(config),
-			values: [...TOOL_DISPLAY_PRESETS],
+			values: TOOL_DISPLAY_PRESETS,
+			inspectorTitle: "Preset Profile",
+			inspectorSummary: [
+				"Determines the overall verbosity and layout of the agent's tool output.",
+				"Choosing a preset applies a coherent profile across read, search, MCP, bash, and diff display settings.",
+			],
+			inspectorOptions: [
+				"opencode — strict inline-only tool output",
+				"balanced — compact summaries with counts",
+				"verbose — larger line previews and more visible bash output",
+				"custom — shown automatically when manual overrides no longer match a preset",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"Presets reset multiple fields together, so manual JSON tuning is the right place for durable custom combinations.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["verbosity", "profile", "layout", "custom", ...TOOL_DISPLAY_PRESETS],
 		},
 		{
 			id: "readOutputMode",
 			label: "Read tool output",
-			description: "hidden = OpenCode style (path only), summary = line count, preview = show file lines",
 			currentValue: config.readOutputMode,
 			values: ["hidden", "summary", "preview"],
+			inspectorTitle: "Read Tool Output",
+			inspectorSummary: [
+				"Controls how read results appear inline after the tool call header.",
+				"Use hidden for the cleanest transcript, summary for file metrics, or preview when seeing source lines matters in-context.",
+			],
+			inspectorOptions: [
+				"hidden — path and status only",
+				"summary — adds compact file metrics",
+				"preview — shows the first configured preview lines",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"expandedPreviewMaxLines bounds how many lines can appear after expanding a preview-heavy read result.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["file", "source", "preview", "summary", "hidden"],
 		},
 		{
 			id: "searchOutputMode",
 			label: "Grep/Find/Ls output",
-			description: "hidden = call only, count = match count, preview = show lines",
 			currentValue: config.searchOutputMode,
 			values: ["hidden", "count", "preview"],
+			inspectorTitle: "Grep / Find / Ls Output",
+			inspectorSummary: [
+				"Controls how search-style tools compress their result sets inside the transcript.",
+				"Count mode keeps discovery actions readable while still surfacing how much data the tool matched.",
+			],
+			inspectorOptions: [
+				"hidden — call header only",
+				"count — totals only for matches or entries",
+				"preview — shows the first configured preview lines",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"Preview-heavy search output is most effective when paired with larger previewLines values in custom configurations.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["grep", "find", "ls", "matches", "count", "results"],
 		},
-		...mcpSettings,
+	];
+
+	if (capabilities.hasMcpTooling) {
+		items.push({
+			id: "mcpOutputMode",
+			label: "MCP tool output",
+			currentValue: config.mcpOutputMode,
+			values: ["hidden", "summary", "preview"],
+			inspectorTitle: "MCP Tool Output",
+			inspectorSummary: [
+				"Controls how proxied MCP tool results are compacted when they return text output.",
+				"Summary mode is the safest default when you want awareness without flooding the chat pane.",
+			],
+			inspectorOptions: [
+				"hidden — call metadata only",
+				"summary — compact line-count summary",
+				"preview — shows the first configured preview lines",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"This control appears only when MCP tooling is available in the current Pi session.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["mcp", "proxy", "server", "summary", "preview"],
+		});
+	}
+
+	items.push(
 		{
 			id: "previewLines",
-			label: "Preview lines (read/search/MCP)",
-			description: "Lines shown in collapsed mode when preview mode is enabled",
+			label: "Preview lines",
 			currentValue: String(config.previewLines),
 			values: PREVIEW_LINE_VALUES,
+			inspectorTitle: "Preview Lines",
+			inspectorSummary: [
+				"Sets how many lines appear when read, search, MCP, or bash preview modes are collapsed inline.",
+				"Accepted manual range: 1 to 80 lines. The quick selector cycles through a curated set for fast tuning.",
+			],
+			inspectorOptions: [
+				"Lower values keep transcripts dense and skimmable",
+				"Higher values surface more source context before expansion",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"Pair this with expandedPreviewMaxLines when you want larger expanded previews without making collapsed output noisy.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["preview", "lines", "range", "collapsed", "read", "grep", "mcp", "bash"],
+		},
+		{
+			id: "bashOutputMode",
+			label: "Bash tool output",
+			currentValue: config.bashOutputMode,
+			values: ["opencode", "summary", "preview"],
+			inspectorTitle: "Bash Tool Output",
+			inspectorSummary: [
+				"Controls how shell command output is rendered when the command finishes successfully.",
+				"The opencode mode keeps command output recognizable while still compressing walls of stdout.",
+			],
+			inspectorOptions: [
+				"opencode — Pi/OpenCode-style collapsed bash view",
+				"summary — output count only",
+				"preview — uses the shared previewLines setting",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"Quiet commands still collapse aggressively, so mode selection matters most on verbose build, test, and script output.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["bash", "shell", "stdout", "command", "opencode"],
 		},
 		{
 			id: "bashCollapsedLines",
 			label: "Bash collapsed lines",
-			description: "OpenCode default is 10; set 0 to hide bash output when collapsed",
 			currentValue: String(config.bashCollapsedLines),
 			values: BASH_PREVIEW_LINE_VALUES,
+			inspectorTitle: "Bash Collapsed Lines",
+			inspectorSummary: [
+				"Sets the inline line budget used specifically by opencode bash mode before expansion.",
+				"Accepted manual range: 0 to 80 lines. Setting 0 hides collapsed bash output entirely while keeping the command visible.",
+			],
+			inspectorOptions: [
+				"0 — hide collapsed bash output",
+				"5/10/20/40 — progressively larger inline command previews",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"This setting only changes the opencode bash renderer; preview mode continues to use previewLines instead.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["bash", "collapsed", "lines", "stdout", "zero"],
 		},
 		{
 			id: "diffViewMode",
 			label: "Edit diff layout",
-			description: "auto = adaptive, split = force side-by-side, unified = force single-column",
 			currentValue: config.diffViewMode,
 			values: ["auto", "split", "unified"],
+			inspectorTitle: "Edit Diff Layout",
+			inspectorSummary: [
+				"Controls how edit and write diffs are arranged when the extension renders code changes.",
+				"Auto mode adapts to terminal width so wide panes get side-by-side diffs while narrow panes stay readable.",
+			],
+			inspectorOptions: [
+				"auto — adaptive layout based on available width",
+				"split — force side-by-side diff columns",
+				"unified — force a single-column diff",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"Manual JSON tuning exposes diffSplitMinWidth, diffCollapsedLines, and diffWordWrap for more aggressive diff control.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["diff", "edit", "write", "split", "unified", "auto"],
 		},
 		{
 			id: "enableNativeUserMessageBox",
 			label: "Native user message box",
-			description: "on = render user prompts in bordered box, off = use default Pi user message rendering",
 			currentValue: toOnOff(config.enableNativeUserMessageBox),
 			values: ["on", "off"],
+			inspectorTitle: "Native User Message Box",
+			inspectorSummary: [
+				"Toggles the bordered native renderer used for user prompts inside the Pi transcript.",
+				"Keep it on when you want clearer message separation, or turn it off to fall back to Pi's default user message rendering.",
+			],
+			inspectorOptions: [
+				"on — bordered native user prompt box",
+				"off — default Pi prompt rendering",
+			],
+			inspectorAdvanced: buildAdvancedNotes(config, capabilities, [
+				"This switch only affects presentation. It does not change stored prompts, markdown handling, or tool behavior.",
+			]),
+			inspectorPath: configPath,
+			searchTerms: ["user", "message", "box", "prompt", "native"],
 		},
-	];
+	);
+
+	return items;
 }
 
 function applyPreset(preset: ToolDisplayPreset): ToolDisplayConfig {
@@ -187,6 +329,11 @@ function applySetting(config: ToolDisplayConfig, id: string, value: string): Too
 				...config,
 				previewLines: parseNumber(value, config.previewLines),
 			};
+		case "bashOutputMode":
+			return {
+				...config,
+				bashOutputMode: value as ToolDisplayConfig["bashOutputMode"],
+			};
 		case "bashCollapsedLines":
 			return {
 				...config,
@@ -202,23 +349,6 @@ function applySetting(config: ToolDisplayConfig, id: string, value: string): Too
 	}
 }
 
-function syncSettingValues(
-	settingsList: SettingValueSyncTarget,
-	config: ToolDisplayConfig,
-	capabilities: ToolDisplayCapabilities,
-): void {
-	settingsList.updateValue("preset", detectToolDisplayPreset(config));
-	settingsList.updateValue("readOutputMode", config.readOutputMode);
-	settingsList.updateValue("searchOutputMode", config.searchOutputMode);
-	if (capabilities.hasMcpTooling) {
-		settingsList.updateValue("mcpOutputMode", config.mcpOutputMode);
-	}
-	settingsList.updateValue("previewLines", String(config.previewLines));
-	settingsList.updateValue("bashCollapsedLines", String(config.bashCollapsedLines));
-	settingsList.updateValue("diffViewMode", config.diffViewMode);
-	settingsList.updateValue("enableNativeUserMessageBox", toOnOff(config.enableNativeUserMessageBox));
-}
-
 function resolveResponsiveOverlayOptions(): ModalOverlayOptions {
 	const terminalWidth =
 		typeof process.stdout.columns === "number" && Number.isFinite(process.stdout.columns)
@@ -230,12 +360,12 @@ function resolveResponsiveOverlayOptions(): ModalOverlayOptions {
 			: 36;
 
 	const margin = 1;
-	const availableWidth = Math.max(24, terminalWidth - margin * 2);
-	const preferredWidth = terminalWidth >= 140 ? 88 : terminalWidth >= 110 ? 82 : 76;
-	const width = Math.max(24, Math.min(preferredWidth, availableWidth));
+	const availableWidth = Math.max(72, terminalWidth - margin * 2);
+	const preferredWidth = terminalWidth >= 170 ? 128 : terminalWidth >= 145 ? 118 : terminalWidth >= 120 ? 106 : 92;
+	const width = Math.max(72, Math.min(preferredWidth, availableWidth));
 
-	const availableHeight = Math.max(10, terminalHeight - margin * 2);
-	const preferredHeight = Math.max(10, Math.floor(terminalHeight * 0.8));
+	const availableHeight = Math.max(14, terminalHeight - margin * 2);
+	const preferredHeight = Math.max(14, Math.floor(terminalHeight * 0.78));
 	const maxHeight = Math.min(preferredHeight, availableHeight);
 
 	return {
@@ -252,41 +382,24 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: ToolD
 
 	await ctx.ui.custom<void>(
 		(tui, theme, _keybindings, done) => {
-			let current = controller.getConfig();
-			let settingsModal: ZellijSettingsModal | null = null;
-
-			settingsModal = new ZellijSettingsModal(
+			const inspector = new SplitPaneInspectorModal(
 				{
-					title: "Pi Tool Display Settings",
-					description: `Core controls for day-to-day output tuning. ${MANUAL_CONFIG_MODAL_HINT}`,
-					settings: buildSettingItems(current, capabilities),
+					getSettings: () => buildInspectorSettings(controller.getConfig(), capabilities),
 					onChange: (id, newValue) => {
-						current = applySetting(current, id, newValue);
-						controller.setConfig(current, ctx);
-						current = controller.getConfig();
-						if (settingsModal) {
-							syncSettingValues(settingsModal, current, capabilities);
-						}
+						const next = applySetting(controller.getConfig(), id, newValue);
+						controller.setConfig(next, ctx);
 					},
 					onClose: () => done(),
-					helpText: `/tool-display preset ${PRESET_COMMAND_HINT} • advanced: edit ${MANUAL_CONFIG_PATH_HINT} • /tool-display show`,
-					enableSearch: true,
 				},
 				theme,
 			);
 
 			const modal = new ZellijModal(
-				settingsModal,
+				inspector,
 				{
-					borderStyle: "rounded",
-					titleBar: {
-						left: "Pi Tool Display Settings",
-						right: "pi-tool-display",
-					},
-					helpUndertitle: {
-						text: "Esc close | ↑↓ navigate | Space toggle",
-						color: "dim",
-					},
+					borderStyle: "square",
+					padding: 0,
+					titleBar: {},
 					overlay: overlayOptions,
 				},
 				theme,

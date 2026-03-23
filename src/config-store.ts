@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	BUILT_IN_TOOL_OVERRIDE_NAMES,
+	BASH_OUTPUT_MODES,
 	DEFAULT_TOOL_DISPLAY_CONFIG,
 	type ConfigLoadResult,
 	type ConfigSaveResult,
@@ -58,6 +59,12 @@ function toMcpOutputMode(value: unknown): ToolDisplayConfig["mcpOutputMode"] {
 	return MCP_OUTPUT_MODES.includes(value as ToolDisplayConfig["mcpOutputMode"])
 		? (value as ToolDisplayConfig["mcpOutputMode"])
 		: DEFAULT_TOOL_DISPLAY_CONFIG.mcpOutputMode;
+}
+
+function toBashOutputMode(value: unknown): ToolDisplayConfig["bashOutputMode"] {
+	return BASH_OUTPUT_MODES.includes(value as ToolDisplayConfig["bashOutputMode"])
+		? (value as ToolDisplayConfig["bashOutputMode"])
+		: DEFAULT_TOOL_DISPLAY_CONFIG.bashOutputMode;
 }
 
 function toDiffViewMode(value: unknown): ToolDisplayConfig["diffViewMode"] {
@@ -118,6 +125,7 @@ export function normalizeToolDisplayConfig(raw: unknown): ToolDisplayConfig {
 			20_000,
 			DEFAULT_TOOL_DISPLAY_CONFIG.expandedPreviewMaxLines,
 		),
+		bashOutputMode: toBashOutputMode(source.bashOutputMode),
 		bashCollapsedLines: clampNumber(source.bashCollapsedLines, 0, 80, DEFAULT_TOOL_DISPLAY_CONFIG.bashCollapsedLines),
 		diffViewMode: toDiffViewMode(source.diffViewMode),
 		diffSplitMinWidth: clampNumber(source.diffSplitMinWidth, 70, 240, DEFAULT_TOOL_DISPLAY_CONFIG.diffSplitMinWidth),

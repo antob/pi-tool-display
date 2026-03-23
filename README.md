@@ -84,15 +84,23 @@ Advanced options remain in `config.json`.
 
 ## Presets
 
-| Preset | Read Output | Search Output | MCP Output | Preview Lines | Bash Lines |
-|--------|-------------|---------------|------------|---------------|------------|
-| `opencode` | hidden | hidden | hidden | 8 | 10 |
-| `balanced` | summary | count | summary | 8 | 10 |
-| `verbose` | preview | preview | preview | 12 | 20 |
+| Preset | Read Output | Search Output | MCP Output | Bash Output | Preview Lines | Bash Lines |
+|--------|-------------|---------------|------------|--------------|---------------|------------|
+| `opencode` | hidden | hidden | hidden | opencode | 8 | 10 |
+| `balanced` | summary | count | summary | summary | 8 | 10 |
+| `verbose` | preview | preview | preview | preview | 12 | 20 |
 
 - **`opencode`** (default): minimal inline-only display; tool results stay collapsed
-- **`balanced`**: compact summaries with line counts and match totals
-- **`verbose`**: larger previews for read/search/MCP output and more visible bash output
+- **`balanced`**: compact summaries with line counts and match totals; bash shows line count only
+- **`verbose`**: larger previews for read/search/MCP/bash output
+
+### Bash Output Modes
+
+| Mode | Behavior |
+|------|----------|
+| `opencode` | Classic collapsed output using `bashCollapsedLines` limit with expansion hint |
+| `summary` | Shows only line count (e.g., "↳ 3 lines returned") — no output displayed |
+| `preview` | Shows actual output lines using `previewLines` limit |
 
 ## Configuration
 
@@ -115,13 +123,14 @@ A starter template is included at `config/config.example.json`.
 | `mcpOutputMode` | string | `"hidden"` | `hidden`, `summary`, or `preview` |
 | `previewLines` | number | `8` | Lines shown in collapsed preview mode |
 | `expandedPreviewMaxLines` | number | `4000` | Max preview lines when fully expanded |
-| `bashCollapsedLines` | number | `10` | Lines shown for collapsed bash output |
+| `bashOutputMode` | string | `"opencode"` | `opencode` (collapse), `summary` (line count), or `preview` (show lines) |
+| `bashCollapsedLines` | number | `10` | Lines shown for collapsed bash output (opencode mode) |
 | `diffViewMode` | string | `"auto"` | `auto`, `split`, or `unified` |
 | `diffSplitMinWidth` | number | `120` | Minimum width before auto mode prefers split diffs |
 | `diffCollapsedLines` | number | `24` | Diff lines shown before collapsing |
 | `diffWordWrap` | boolean | `true` | Wrap long diff lines when needed |
-| `showTruncationHints` | boolean | `true` | Show truncation indicators for compacted output |
-| `showRtkCompactionHints` | boolean | `true` | Show RTK compaction hints when RTK metadata exists |
+| `showTruncationHints` | boolean | `false` | Show truncation indicators for compacted output |
+| `showRtkCompactionHints` | boolean | `false` | Show RTK compaction hints when RTK metadata exists |
 
 ### Tool ownership
 
@@ -164,13 +173,14 @@ Set any entry to `false` if another extension should handle that tool instead.
   "mcpOutputMode": "summary",
   "previewLines": 12,
   "expandedPreviewMaxLines": 4000,
+  "bashOutputMode": "opencode",
   "bashCollapsedLines": 15,
   "diffViewMode": "auto",
   "diffSplitMinWidth": 120,
   "diffCollapsedLines": 24,
   "diffWordWrap": true,
-  "showTruncationHints": true,
-  "showRtkCompactionHints": true
+  "showTruncationHints": false,
+  "showRtkCompactionHints": false
 }
 ```
 

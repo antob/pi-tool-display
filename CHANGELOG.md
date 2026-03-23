@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-24
+
+### Added
+- `bashOutputMode` config option with three modes: `opencode` (classic collapse), `summary` (line count only), `preview` (show lines)
+- Live bash preview with spinner animation and elapsed time during command execution
+- `bash-display.ts` module for bash call rendering with spinner state management
+- `modal-icons.ts` module for Nerd Font detection and modal icon sets (`PI_NERD_FONTS` and `POWERLINE_NERD_FONTS` env vars)
+- `settings-inspector-modal.ts` module with split-pane inspector UI (category list + setting details)
+- Search icon in settings inspector modal filter hint (Nerd Font `\uF002` or emoji `🔍`)
+
+### Changed
+- Settings modal now uses split-pane inspector with setting descriptions, summaries, and advanced notes
+- Modal width increased to accommodate split-pane layout (wider terminals get more space)
+- `showTruncationHints` config now defaults to `false`
+- `showRtkCompactionHints` config now defaults to `false`
+- Bash output now supports different rendering modes controlled by `bashOutputMode`
+- Refactored config modal to use new inspector modal component instead of legacy settings modal
+
+### Config
+- Added `bashOutputMode: "opencode" | "summary" | "preview"` to config schema
+- Updated example config to demonstrate new `bashOutputMode` option
+- Presets now include appropriate `bashOutputMode` values ("summary" for compact, "preview" for verbose)
+
+### Tests
+- Added comprehensive tests for bash output modes (opencode, summary, preview)
+- Added test coverage for spinner state management and elapsed time formatting
+- Added tests for modal icon detection with various terminal environments
+
 ## [0.1.12] - 2026-03-23
 
 ### Added

@@ -20,6 +20,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
+import { renderBashCall } from "./bash-display.js";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -440,6 +441,19 @@ function formatSearchSummary(
   return summary;
 }
 
+function formatBashSummary(
+  lines: string[],
+  _details: BashToolDetails | undefined,
+  theme: RenderTheme,
+  _showTruncationHints: boolean,
+): string {
+  const lineCount = lines.length;
+  return theme.fg(
+    "muted",
+    `↳ ${lineCount} ${pluralize(lineCount, "line")} returned`,
+  );
+}
+
 function formatBashTruncationHints(
   details: BashToolDetails | undefined,
   theme: RenderTheme,
@@ -459,6 +473,81 @@ function formatBashTruncationHints(
     return "";
   }
   return `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`;
+}
+
+function getBashPreviewLineLimit(
+  lines: string[],
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+): number {
+  if (options.expanded) {
+    return getExpandedPreviewLineLimit(lines, config);
+  }
+
+  return config.bashOutputMode === "opencode"
+    ? config.bashCollapsedLines
+    : config.previewLines;
+}
+
+function renderBashLivePreview(
+  rawOutput: string,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+  theme: RenderTheme,
+  details: BashToolDetails | undefined,
+): Text {
+  const lines = prepareOutputLines(rawOutput, options);
+  if (lines.length === 0) {
+    return new Text("", 0, 0);
+  }
+
+  const maxLines = getBashPreviewLineLimit(lines, options, config);
+  if (!options.expanded && maxLines === 0) {
+    return new Text("", 0, 0);
+  }
+
+  let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
+  if (config.showTruncationHints) {
+    preview += formatBashTruncationHints(details, theme);
+  }
+  if (options.expanded) {
+    preview += formatExpandedPreviewCapHint(lines, config, theme);
+  }
+  return new Text(preview, 0, 0);
+}
+
+function renderBashErrorResult(
+  rawOutput: string,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+  theme: RenderTheme,
+  details: BashToolDetails | undefined,
+): Text {
+  const lines = prepareOutputLines(rawOutput, options);
+  let text = theme.fg("error", "↳ command failed");
+
+  if (lines.length > 0) {
+    const maxLines = getBashPreviewLineLimit(lines, options, config);
+    if (options.expanded || maxLines > 0) {
+      const { shown, remaining } = previewLines(lines, maxLines);
+      text += `\n${shown
+        .map((line) => theme.fg("error", sanitizeAnsiForThemedOutput(line)))
+        .join("\n")}`;
+      if (remaining > 0) {
+        const hint = options.expanded ? "" : " • Ctrl+O to expand";
+        text += `\n${theme.fg("muted", `... (${remaining} more ${pluralize(remaining, "line")}${hint})`)}`;
+      }
+    }
+  }
+
+  if (config.showTruncationHints) {
+    text += formatBashTruncationHints(details, theme);
+  }
+  if (options.expanded && lines.length > 0) {
+    text += formatExpandedPreviewCapHint(lines, config, theme);
+  }
+
+  return new Text(text, 0, 0);
 }
 
 function renderSearchResult(
@@ -1031,30 +1120,25 @@ export function registerToolDisplayOverrides(
         onUpdate,
       );
     },
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       lastBashCommand =
         typeof args.command === "string" ? args.command : undefined;
-      const commandDisplay =
-        typeof args.command === "string" && args.command.trim().length > 0
-          ? args.command
-          : "...";
-      const timeoutSuffix = args.timeout
-        ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
-        : "";
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("$"))} ${theme.fg("accent", commandDisplay)}${timeoutSuffix}`,
-        0,
-        0,
-      );
+      return renderBashCall(args, theme, context);
     },
     renderResult(result, options, theme) {
-      if (options.isPartial) {
-        return new Text(theme.fg("warning", "running..."), 0, 0);
-      }
-
       const config = getConfig();
       const details = result.details as BashToolDetails | undefined;
-      const lines = prepareOutputLines(extractTextOutput(result), options);
+      const rawOutput = extractTextOutput(result);
+
+      if (options.isPartial) {
+        return renderBashLivePreview(rawOutput, options, config, theme, details);
+      }
+
+      if ((result as { isError?: boolean }).isError) {
+        return renderBashErrorResult(rawOutput, options, config, theme, details);
+      }
+
+      const lines = prepareOutputLines(rawOutput, options);
 
       if (lines.length === 0) {
         let text = formatBashNoOutputLine(lastBashCommand, theme);
@@ -1062,6 +1146,33 @@ export function registerToolDisplayOverrides(
           text += formatBashTruncationHints(details, theme);
         }
         return new Text(text, 0, 0);
+      }
+
+      if (config.bashOutputMode === "summary") {
+        let summary = formatBashSummary(
+          lines,
+          details,
+          theme,
+          config.showTruncationHints,
+        );
+        if (config.showTruncationHints) {
+          summary += formatBashTruncationHints(details, theme);
+        }
+        return new Text(summary, 0, 0);
+      }
+
+      if (config.bashOutputMode === "preview") {
+        const maxLines = options.expanded
+          ? getExpandedPreviewLineLimit(lines, config)
+          : config.previewLines;
+        let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
+        if (config.showTruncationHints) {
+          preview += formatBashTruncationHints(details, theme);
+        }
+        if (options.expanded) {
+          preview += formatExpandedPreviewCapHint(lines, config, theme);
+        }
+        return new Text(preview, 0, 0);
       }
 
       if (!options.expanded && config.bashCollapsedLines === 0) {
