@@ -4,7 +4,8 @@ OpenCode-style tool rendering for the [Pi coding agent](https://github.com/mario
 
 `pi-tool-display` keeps tool calls compact by default, adds richer diff rendering for file edits, and improves a few core chat UI details such as thinking labels and the native user prompt box.
 
-![Screenshot](https://raw.githubusercontent.com/MasuRii/pi-tool-display/main/assets/pi-tool-display.png)
+<img width="1360" height="752" alt="image" src="https://github.com/user-attachments/assets/777944a2-18b2-4642-b035-2c703a5abb1b" />
+
 
 <img width="978" height="670" alt="image" src="https://github.com/user-attachments/assets/122b69ce-6c99-4aaa-ba93-236f97a1d8b4" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/7d5e36d3-cbe1-4d54-8bed-ae3dbdef870c" />
