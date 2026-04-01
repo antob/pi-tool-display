@@ -279,9 +279,12 @@ npm run test
 npm run check
 ```
 
-## Related extensions
+## Related Pi Extensions
 
-- [pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer) — RTK optimizer for token-efficient source output
+- [pi-image-tools](https://github.com/MasuRii/pi-image-tools) — Image attachment and inline preview for the Pi TUI
+- [pi-hide-messages](https://github.com/MasuRii/pi-hide-messages) — Hide older chat messages without losing context
+- [pi-startup-redraw-fix](https://github.com/MasuRii/pi-startup-redraw-fix) — Fix terminal redraw glitches on startup
+- [pi-permission-system](https://github.com/MasuRii/pi-permission-system) — Permission enforcement for tool and command access
 
 ## License
 
