@@ -230,6 +230,21 @@ function fitToWidth(text: string, width: number): string {
 	return gap > 0 ? `${trimmed}${" ".repeat(gap)}` : trimmed;
 }
 
+function applyLineBackgroundToWidth(
+	text: string,
+	width: number,
+	rowBgAnsi: string,
+	restoreBgAnsi: string,
+): string {
+	if (width <= 0) {
+		return "";
+	}
+
+	const fitted = fitToWidth(text, width);
+	const withStableBackground = keepBackgroundAcrossResets(fitted, rowBgAnsi);
+	return stabilizeBackgroundResets(`${rowBgAnsi}${withStableBackground}${restoreBgAnsi}`);
+}
+
 function wrapToWidth(text: string, width: number, wordWrap: boolean): string[] {
 	if (width <= 0) {
 		return [""];
@@ -1262,8 +1277,8 @@ function renderCompactLineCell(
 		return [""];
 	}
 
-	const prefix = renderCompactLinePrefix(kind, theme, rowBg);
-	const continuationPrefix = renderCompactContinuationPrefix(rowBg);
+	const prefix = renderCompactLinePrefix(kind, theme, undefined);
+	const continuationPrefix = renderCompactContinuationPrefix(undefined);
 	const prefixPlainWidth = 2;
 	const codeWidth = Math.max(0, width - prefixPlainWidth);
 	const wrappedCodeLines = wrapToWidth(code, codeWidth, wordWrap);
@@ -1276,9 +1291,8 @@ function renderCompactLineCell(
 
 	const safeRestoreBgAnsi = restoreBgAnsi ?? rowBg ?? ANSI_BG_RESET;
 	return wrappedCodeLines.map((wrappedCodeLine, index) => {
-		const safeWrappedCodeLine = keepBackgroundAcrossResets(wrappedCodeLine, rowBg);
 		const linePrefix = index === 0 ? prefix : continuationPrefix;
-		return stabilizeBackgroundResets(`${linePrefix}${rowBg}${safeWrappedCodeLine}${safeRestoreBgAnsi}`);
+		return applyLineBackgroundToWidth(`${linePrefix}${wrappedCodeLine}`, width, rowBg, safeRestoreBgAnsi);
 	});
 }
 
@@ -1299,25 +1313,26 @@ function renderLineCell(
 	const prefixPlainWidth = visibleWidth(`▌ ${lineNumber} `);
 	const dividerPlainWidth = 2;
 	const codeWidth = Math.max(0, width - prefixPlainWidth - dividerPlainWidth);
-	const continuationPrefix = renderLineContinuationPrefix(lineNumber.length, rowBg, theme);
+	const prefix = renderLinePrefix(kind, lineNumber, theme, undefined);
+	const continuationPrefix = renderLineContinuationPrefix(lineNumber.length, undefined, theme);
+	const divider = renderCodeDivider(theme, undefined);
+	const wrappedCodeLines = wrapToWidth(code, codeWidth, wordWrap);
 
 	if (!rowBg) {
-		const prefix = renderLinePrefix(kind, lineNumber, theme, undefined);
-		const divider = renderCodeDivider(theme, undefined);
-		const wrappedCodeLines = wrapToWidth(code, codeWidth, wordWrap);
 		return wrappedCodeLines.map((wrappedCodeLine, index) =>
 			stabilizeBackgroundResets(`${index === 0 ? prefix : continuationPrefix}${divider}${wrappedCodeLine}`)
 		);
 	}
 
-	const prefix = renderLinePrefix(kind, lineNumber, theme, rowBg);
-	const divider = renderCodeDivider(theme, rowBg);
 	const safeRestoreBgAnsi = restoreBgAnsi ?? rowBg ?? ANSI_BG_RESET;
-	const wrappedCodeLines = wrapToWidth(keepBackgroundAcrossResets(code, rowBg), codeWidth, wordWrap);
 	return wrappedCodeLines.map((wrappedCodeLine, index) => {
-		const safeWrappedCodeLine = keepBackgroundAcrossResets(wrappedCodeLine, rowBg);
 		const linePrefix = index === 0 ? prefix : continuationPrefix;
-		return stabilizeBackgroundResets(`${linePrefix}${divider}${rowBg}${safeWrappedCodeLine}${safeRestoreBgAnsi}`);
+		return applyLineBackgroundToWidth(
+			`${linePrefix}${divider}${wrappedCodeLine}`,
+			width,
+			rowBg,
+			safeRestoreBgAnsi,
+		);
 	});
 }
 

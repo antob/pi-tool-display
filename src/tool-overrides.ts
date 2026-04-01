@@ -36,9 +36,12 @@ import {
 } from "./render-utils.js";
 import { renderEditDiffResult, renderWriteDiffResult } from "./diff-renderer.js";
 import {
+  buildPromptSnippetFromDescription,
   extractPromptMetadata,
   getTextField,
   isMcpToolCandidate,
+  MCP_PROXY_PROMPT_GUIDELINES,
+  MCP_PROXY_PROMPT_SNIPPET,
   toRecord,
 } from "./tool-metadata.js";
 import type {
@@ -76,8 +79,21 @@ interface RtkCompactionInfo {
   compactedLineCount?: number;
 }
 
+interface ToolRenderContextLike {
+  args?: unknown;
+  toolCallId?: string;
+  state?: unknown;
+  isError?: boolean;
+}
+
+interface WriteExecutionMeta {
+  previousContent?: string;
+  fileExistedBeforeWrite: boolean;
+}
+
 const builtInToolCache = new Map<string, BuiltInTools>();
 const RTK_COMPACTION_LABEL = "compacted by RTK";
+const WRITE_EXECUTION_META_STATE_KEY = "__piToolDisplayWriteExecutionMeta";
 
 function cloneToolParameters<T>(parameters: T, seen = new WeakMap<object, unknown>()): T {
   if (parameters === null || typeof parameters !== "object") {
@@ -215,6 +231,86 @@ function countTextLines(value: unknown): number {
     return 0;
   }
   return splitLines(value).length;
+}
+
+function getStringField(value: unknown, field: string): string | undefined {
+  const raw = toRecord(value)[field];
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function getNumericField(value: unknown, field: string): number | undefined {
+  const raw = toRecord(value)[field];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+function getToolPathArg(value: unknown): string | undefined {
+  return getStringField(value, "file_path") ?? getStringField(value, "path");
+}
+
+function getToolContentArg(value: unknown): string | undefined {
+  return getStringField(value, "content");
+}
+
+function getEditLineCount(value: unknown): number {
+  const record = toRecord(value);
+  const edits = Array.isArray(record.edits) ? record.edits : [];
+  if (edits.length > 0) {
+    return edits.reduce((total, edit) => {
+      return total + countTextLines(getStringField(edit, "newText"));
+    }, 0);
+  }
+
+  return countTextLines(record.newText);
+}
+
+function isToolError(
+  result: unknown,
+  context?: ToolRenderContextLike,
+): boolean {
+  return context?.isError === true || toRecord(result).isError === true;
+}
+
+function toStateCarrier(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function getWriteExecutionMeta(
+  context: ToolRenderContextLike | undefined,
+  pendingMetaByToolCallId: Map<string, WriteExecutionMeta>,
+): WriteExecutionMeta | undefined {
+  if (!context) {
+    return undefined;
+  }
+
+  const carrier = toStateCarrier(context.state);
+  const existing = carrier
+    ? toRecord(carrier[WRITE_EXECUTION_META_STATE_KEY])
+    : undefined;
+  if (existing && Object.keys(existing).length > 0) {
+    return existing as WriteExecutionMeta;
+  }
+
+  if (!context.toolCallId) {
+    return undefined;
+  }
+
+  const pending = pendingMetaByToolCallId.get(context.toolCallId);
+  if (!pending) {
+    return undefined;
+  }
+
+  if (carrier) {
+    const storedMeta: WriteExecutionMeta = { ...pending };
+    carrier[WRITE_EXECUTION_META_STATE_KEY] = storedMeta;
+    pendingMetaByToolCallId.delete(context.toolCallId);
+    return storedMeta;
+  }
+
+  return pending;
 }
 
 function formatLineCountSuffix(
@@ -751,15 +847,7 @@ export function registerToolDisplayOverrides(
     edit: cloneToolParameters(bootstrapTools.edit.parameters),
     write: cloneToolParameters(bootstrapTools.write.parameters),
   };
-  let lastEditPath: string | undefined;
-  let lastEditLineCount = 0;
-  let lastWritePath: string | undefined;
-  let lastWriteContent: string | undefined;
-  let lastWriteLineCount = 0;
-  let lastWriteSizeBytes = 0;
-  let lastWritePreviousContent: string | undefined;
-  let lastWriteWasOverwrite = false;
-  let lastBashCommand: string | undefined;
+  const writeExecutionMetaByToolCallId = new Map<string, WriteExecutionMeta>();
 
   const registerIfOwned = (
     toolName: BuiltInToolOverrideName,
@@ -777,6 +865,7 @@ export function registerToolDisplayOverrides(
       description: bootstrapTools.read.description,
       ...builtInPromptMetadata.read,
       parameters: clonedParameters.read,
+      prepareArguments: bootstrapTools.read.prepareArguments,
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         return getBuiltInTools(ctx.cwd).read.execute(
           toolCallId,
@@ -786,12 +875,14 @@ export function registerToolDisplayOverrides(
         );
       },
       renderCall(args, theme) {
-        const path = shortenPath(args.path);
+        const path = shortenPath(getToolPathArg(args));
+        const offset = getNumericField(args, "offset");
+        const limit = getNumericField(args, "limit");
         let suffix = "";
-        if (args.offset !== undefined || args.limit !== undefined) {
-          const from = args.offset ?? 1;
+        if (offset !== undefined || limit !== undefined) {
+          const from = offset ?? 1;
           const to =
-            args.limit !== undefined ? from + args.limit - 1 : undefined;
+            limit !== undefined ? from + limit - 1 : undefined;
           suffix = to ? `:${from}-${to}` : `:${from}`;
         }
         const line = `${theme.fg("toolTitle", theme.bold("read"))} ${theme.fg("accent", path || "...")}${theme.fg("warning", suffix)}`;
@@ -848,6 +939,7 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.grep.description,
     ...builtInPromptMetadata.grep,
     parameters: clonedParameters.grep,
+    prepareArguments: bootstrapTools.grep.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return getBuiltInTools(ctx.cwd).grep.execute(
         toolCallId,
@@ -887,6 +979,7 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.find.description,
     ...builtInPromptMetadata.find,
     parameters: clonedParameters.find,
+    prepareArguments: bootstrapTools.find.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return getBuiltInTools(ctx.cwd).find.execute(
         toolCallId,
@@ -924,6 +1017,7 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.ls.description,
     ...builtInPromptMetadata.ls,
     parameters: clonedParameters.ls,
+    prepareArguments: bootstrapTools.ls.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return getBuiltInTools(ctx.cwd).ls.execute(
         toolCallId,
@@ -962,10 +1056,8 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.edit.description,
     ...builtInPromptMetadata.edit,
     parameters: clonedParameters.edit,
+    prepareArguments: bootstrapTools.edit.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      lastEditPath = typeof params.path === "string" ? params.path : lastEditPath;
-      lastEditLineCount = countTextLines(params.newText);
-
       return getBuiltInTools(ctx.cwd).edit.execute(
         toolCallId,
         params,
@@ -974,26 +1066,26 @@ export function registerToolDisplayOverrides(
       );
     },
     renderCall(args, theme) {
-      lastEditPath = typeof args.path === "string" ? args.path : undefined;
-      lastEditLineCount = countTextLines(args.newText);
-      const path = shortenPath(args.path);
+      const path = shortenPath(getToolPathArg(args));
+      const lineCount = getEditLineCount(args);
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", path || "...")}${formatLineCountSuffix(lastEditLineCount, theme)}`,
+        `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", path || "...")}${formatLineCountSuffix(lineCount, theme)}`,
         0,
         0,
       );
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
+      const lineCount = getEditLineCount(context?.args);
       if (options.isPartial) {
         return new Text(
-          formatInProgressLineCount("editing", lastEditLineCount, theme),
+          formatInProgressLineCount("editing", lineCount, theme),
           0,
           0,
         );
       }
 
       const fallbackText = extractTextOutput(result);
-      if ((result as { isError?: boolean }).isError) {
+      if (isToolError(result, context)) {
         const error = fallbackText || "Edit failed.";
         return new Text(theme.fg("error", error), 0, 0);
       }
@@ -1002,7 +1094,7 @@ export function registerToolDisplayOverrides(
       const details = result.details as EditToolDetails | undefined;
       return renderEditDiffResult(
         details,
-        { expanded: options.expanded, filePath: lastEditPath },
+        { expanded: options.expanded, filePath: getToolPathArg(context?.args) },
         config,
         theme,
         fallbackText,
@@ -1018,17 +1110,13 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.write.description,
     ...builtInPromptMetadata.write,
     parameters: clonedParameters.write,
+    prepareArguments: bootstrapTools.write.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      lastWritePath =
-        typeof params.path === "string" ? params.path : lastWritePath;
-      lastWriteContent =
-        typeof params.content === "string" ? params.content : lastWriteContent;
-      lastWriteLineCount = countWriteContentLines(params.content);
-      lastWriteSizeBytes = getWriteContentSizeBytes(params.content);
-
       const previous = captureExistingWriteContent(ctx.cwd, params.path);
-      lastWriteWasOverwrite = previous.existed;
-      lastWritePreviousContent = previous.content;
+      writeExecutionMetaByToolCallId.set(toolCallId, {
+        fileExistedBeforeWrite: previous.existed,
+        previousContent: previous.content,
+      });
 
       return getBuiltInTools(ctx.cwd).write.execute(
         toolCallId,
@@ -1038,34 +1126,15 @@ export function registerToolDisplayOverrides(
       );
     },
     renderCall(args, theme) {
-      const incomingPath = typeof args.path === "string" ? args.path : undefined;
-      const incomingContent =
-        typeof args.content === "string" ? args.content : undefined;
-
-      if (incomingPath !== undefined) {
-        const pathChanged = incomingPath !== lastWritePath;
-        lastWritePath = incomingPath;
-
-        if (pathChanged && incomingContent === undefined) {
-          lastWriteContent = undefined;
-          lastWriteLineCount = 0;
-          lastWriteSizeBytes = 0;
-        }
-      }
-
-      if (incomingContent !== undefined) {
-        lastWriteContent = incomingContent;
-        lastWriteLineCount = countWriteContentLines(incomingContent);
-        lastWriteSizeBytes = getWriteContentSizeBytes(incomingContent);
-      }
-
-      const path = shortenPath(lastWritePath);
-      const hasContent = incomingContent !== undefined || lastWriteContent !== undefined;
+      const content = getToolContentArg(args);
+      const lineCount = countWriteContentLines(content);
+      const sizeBytes = getWriteContentSizeBytes(content);
+      const path = shortenPath(getToolPathArg(args));
       const suffix = shouldRenderWriteCallSummary({
-        hasContent,
+        hasContent: content !== undefined,
         hasDetailedResultHeader: false,
       })
-        ? formatWriteCallSuffix(lastWriteLineCount, lastWriteSizeBytes, theme)
+        ? formatWriteCallSuffix(lineCount, sizeBytes, theme)
         : "";
       return new Text(
         `${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("accent", path || "...")}${suffix}`,
@@ -1073,29 +1142,35 @@ export function registerToolDisplayOverrides(
         0,
       );
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
+      const content = getToolContentArg(context?.args);
+      const lineCount = countWriteContentLines(content);
       if (options.isPartial) {
         return new Text(
-          formatInProgressLineCount("writing", lastWriteLineCount, theme),
+          formatInProgressLineCount("writing", lineCount, theme),
           0,
           0,
         );
       }
 
       const fallbackText = extractTextOutput(result);
-      if ((result as { isError?: boolean }).isError) {
+      if (isToolError(result, context)) {
         const error = fallbackText || "Write failed.";
         return new Text(theme.fg("error", error), 0, 0);
       }
 
       const config = getConfig();
+      const executionMeta = getWriteExecutionMeta(
+        context,
+        writeExecutionMetaByToolCallId,
+      );
       return renderWriteDiffResult(
-        lastWriteContent,
+        content,
         {
           expanded: options.expanded,
-          filePath: lastWritePath,
-          previousContent: lastWritePreviousContent,
-          fileExistedBeforeWrite: lastWriteWasOverwrite,
+          filePath: getToolPathArg(context?.args),
+          previousContent: executionMeta?.previousContent,
+          fileExistedBeforeWrite: executionMeta?.fileExistedBeforeWrite ?? false,
         },
         config,
         theme,
@@ -1112,6 +1187,7 @@ export function registerToolDisplayOverrides(
     description: bootstrapTools.bash.description,
     ...builtInPromptMetadata.bash,
     parameters: clonedParameters.bash,
+    prepareArguments: bootstrapTools.bash.prepareArguments,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return getBuiltInTools(ctx.cwd).bash.execute(
         toolCallId,
@@ -1121,11 +1197,9 @@ export function registerToolDisplayOverrides(
       );
     },
     renderCall(args, theme, context) {
-      lastBashCommand =
-        typeof args.command === "string" ? args.command : undefined;
       return renderBashCall(args, theme, context);
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, context) {
       const config = getConfig();
       const details = result.details as BashToolDetails | undefined;
       const rawOutput = extractTextOutput(result);
@@ -1134,14 +1208,14 @@ export function registerToolDisplayOverrides(
         return renderBashLivePreview(rawOutput, options, config, theme, details);
       }
 
-      if ((result as { isError?: boolean }).isError) {
+      if (isToolError(result, context)) {
         return renderBashErrorResult(rawOutput, options, config, theme, details);
       }
 
       const lines = prepareOutputLines(rawOutput, options);
 
       if (lines.length === 0) {
-        let text = formatBashNoOutputLine(lastBashCommand, theme);
+        let text = formatBashNoOutputLine(getStringField(context?.args, "command"), theme);
         if (config.showTruncationHints) {
           text += formatBashTruncationHints(details, theme);
         }
@@ -1222,6 +1296,10 @@ export function registerToolDisplayOverrides(
       }
 
       const executeDelegate = executeCandidate as (...args: unknown[]) => unknown;
+      const prepareArgumentsDelegate =
+        typeof toolRecord.prepareArguments === "function"
+          ? (toolRecord.prepareArguments as (args: unknown) => unknown)
+          : undefined;
       const toolLabel =
         getTextField(candidate, "label") ||
         (toolName === "mcp" ? "MCP Proxy" : `MCP ${toolName}`);
@@ -1229,11 +1307,26 @@ export function registerToolDisplayOverrides(
         getTextField(candidate, "description") || "MCP tool";
       const parameters = toRecord(toolRecord.parameters);
 
+      const promptMetadata =
+        toolName === "mcp"
+          ? {
+              promptSnippet: MCP_PROXY_PROMPT_SNIPPET,
+              promptGuidelines: [...MCP_PROXY_PROMPT_GUIDELINES],
+            }
+          : {
+              promptSnippet: buildPromptSnippetFromDescription(
+                toolDescription,
+                `Call MCP tool '${toolName}'.`,
+              ),
+            };
+
       pi.registerTool({
         name: toolName,
         label: toolLabel,
         description: toolDescription,
+        ...promptMetadata,
         parameters,
+        prepareArguments: prepareArgumentsDelegate,
         async execute(toolCallId, params, signal, onUpdate, ctx) {
           return await Promise.resolve(
             executeDelegate(toolCallId, params, signal, onUpdate, ctx),

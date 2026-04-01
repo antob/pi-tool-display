@@ -23,6 +23,10 @@ interface RenderCallContextLike {
 
 interface RegisteredToolLike {
 	name: string;
+	description?: string;
+	parameters?: unknown;
+	promptSnippet?: string;
+	promptGuidelines?: string[];
 	renderCall?: (args: unknown, theme: RenderThemeLike, context: RenderCallContextLike) => RenderComponentLike;
 	renderResult?: (result: unknown, options: unknown, theme: unknown) => RenderComponentLike;
 }
@@ -178,6 +182,46 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), "one\ntwo\n"),
 		"↳ 2 lines returned",
 	);
+});
+
+test("registerToolDisplayOverrides preserves MCP prompt metadata for proxy and direct wrappers", async () => {
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+		{
+			name: "mcp",
+			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
+			parameters: {},
+			execute(): void {
+				// No-op test stub.
+			},
+		},
+		{
+			name: "exa_web_search_exa",
+			label: "MCP exa:web_search_exa",
+			description:
+				"Search the web for current information. Direct MCP wrapper for 'exa:web_search_exa'. Common args: query*.",
+			parameters: {},
+			execute(): void {
+				// No-op test stub.
+			},
+		},
+	]);
+
+	registerToolDisplayOverrides(api, () => DEFAULT_TOOL_DISPLAY_CONFIG);
+	await eventHandlers.session_start?.();
+
+	const byName = new Map(registeredTools.map((tool) => [tool.name, tool]));
+	assert.equal(
+		byName.get("mcp")?.promptSnippet,
+		"Discover, inspect, and call MCP tools across configured servers",
+	);
+	assert.deepEqual(byName.get("mcp")?.promptGuidelines, [
+		"Use mcp for MCP discovery first: search by capability, describe one exact tool, then call it.",
+	]);
+	assert.equal(
+		byName.get("exa_web_search_exa")?.promptSnippet,
+		"Search the web for current information",
+	);
+	assert.equal(byName.get("exa_web_search_exa")?.promptGuidelines, undefined);
 });
 
 test("read-only ownership keeps summary line counts confined to read", () => {

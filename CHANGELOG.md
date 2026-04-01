@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-01
+
+### Added
+- `prepareArguments` delegate support for built-in tool overrides (read, grep, find, ls, edit, write, bash)
+- `buildPromptSnippetFromDescription()` helper to derive prompt snippets from MCP tool descriptions
+- MCP proxy prompt metadata (`MCP_PROXY_PROMPT_SNIPPET`, `MCP_PROXY_PROMPT_GUIDELINES`) for tool registration
+- Write execution metadata tracking via tool call ID for accurate diff rendering across execution lifecycle
+- `applyLineBackgroundToWidth()` helper for consistent line background handling in diff renderer
+
+### Changed
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.64.0
+- Refactored tool-overrides to use context-based argument extraction instead of closure state
+- Improved diff renderer width handling with cleaner background reset logic
+- Simplified continuation prefix rendering by removing unnecessary row background parameters
+- Enhanced MCP proxy tool registration with proper prompt metadata propagation
+
+### Fixed
+- Write diff rendering now correctly tracks previous content and file existence state across render phases
+- Tool call rendering now uses context-based state instead of global mutable state
+
+### Tests
+- Added tests for diff renderer width handling with line backgrounds
+- Added tests for tool-overrides configuration and prepareArguments delegation
+
 ## [0.2.0] - 2026-03-24
 
 ### Added

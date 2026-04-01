@@ -70,6 +70,86 @@ function assertLinesFitWidth(lines: string[], width: number): void {
 	}
 }
 
+interface VisibleBackgroundCell {
+	char: string;
+	background: string | null;
+}
+
+function updateBackgroundState(rawParams: string, currentBackground: string | null): string | null {
+	if (!rawParams.trim()) {
+		return null;
+	}
+
+	const params = rawParams
+		.split(";")
+		.map((token) => Number.parseInt(token, 10))
+		.filter((value) => Number.isFinite(value));
+	let nextBackground = currentBackground;
+
+	for (let index = 0; index < params.length; index += 1) {
+		const param = params[index] ?? 0;
+		if (param === 0 || param === 49) {
+			nextBackground = null;
+			continue;
+		}
+		if ((param >= 40 && param <= 47) || (param >= 100 && param <= 107)) {
+			nextBackground = `\x1b[${param}m`;
+			continue;
+		}
+		if (param !== 48) {
+			continue;
+		}
+
+		const colorMode = params[index + 1];
+		if (colorMode === 5) {
+			const colorValue = params[index + 2];
+			if (typeof colorValue === "number" && Number.isFinite(colorValue)) {
+				nextBackground = `\x1b[48;5;${colorValue}m`;
+				index += 2;
+			}
+			continue;
+		}
+		if (colorMode === 2) {
+			const red = params[index + 2];
+			const green = params[index + 3];
+			const blue = params[index + 4];
+			if (
+				typeof red === "number"
+				&& typeof green === "number"
+				&& typeof blue === "number"
+				&& Number.isFinite(red)
+				&& Number.isFinite(green)
+				&& Number.isFinite(blue)
+			) {
+				nextBackground = `\x1b[48;2;${red};${green};${blue}m`;
+				index += 4;
+			}
+		}
+	}
+
+	return nextBackground;
+}
+
+function collectVisibleBackgrounds(text: string): VisibleBackgroundCell[] {
+	const cells: VisibleBackgroundCell[] = [];
+	let activeBackground: string | null = null;
+
+	for (let index = 0; index < text.length; index += 1) {
+		if (text[index] === "\x1b" && text[index + 1] === "[") {
+			const sequenceEnd = text.indexOf("m", index);
+			if (sequenceEnd !== -1) {
+				activeBackground = updateBackgroundState(text.slice(index + 2, sequenceEnd), activeBackground);
+				index = sequenceEnd;
+				continue;
+			}
+		}
+
+		cells.push({ char: text[index] ?? "", background: activeBackground });
+	}
+
+	return cells;
+}
+
 test("diff presentation mode progressively degrades for narrow widths", () => {
 	assert.equal(resolveDiffPresentationMode(diffConfig, 120, true), "split");
 	assert.equal(resolveDiffPresentationMode(diffConfig, 24, false), "unified");
@@ -140,6 +220,60 @@ test("write overwrite diff renderer falls back when the overwrite matrix would b
 	const lines = renderInsideToolBox(component, 80);
 	assertLinesFitWidth(lines, 80);
 	assert.match(lines.join("\n"), /overwrite diff omitted/i);
+});
+
+test("row backgrounds keep trailing padding painted to the rendered width", () => {
+	const baseBg = { r: 10, g: 20, b: 30 };
+	const addFg = { r: 100, g: 150, b: 200 };
+	const removeFg = { r: 200, g: 100, b: 120 };
+	const palette = resolveInlineHighlightPalette(baseBg, addFg, removeFg);
+	const ansiTheme = {
+		fg: (_color: string, text: string): string => `\x1b[38;2;1;2;3m${text}\x1b[0m`,
+		bold: (text: string): string => text,
+		getFgAnsi: (slot: string): string | undefined => {
+			if (slot === "toolDiffAdded") {
+				return `\x1b[38;2;${addFg.r};${addFg.g};${addFg.b}m`;
+			}
+			if (slot === "toolDiffRemoved") {
+				return `\x1b[38;2;${removeFg.r};${removeFg.g};${removeFg.b}m`;
+			}
+			return undefined;
+		},
+		getBgAnsi: (slot: string): string | undefined => {
+			if (slot === "toolSuccessBg") {
+				return `\x1b[48;2;${baseBg.r};${baseBg.g};${baseBg.b}m`;
+			}
+			return undefined;
+		},
+	};
+	const component = renderEditDiffResult(
+		{
+			diff: "--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-keep before\n+keep after\n",
+		},
+		{ expanded: true, filePath: "demo.txt" },
+		diffConfig as any,
+		ansiTheme,
+		"",
+	);
+
+	const lines = component.render(60);
+	const addedLine = lines.find((line) => line.includes("after"));
+	assert.ok(addedLine, "expected an added line containing the diff content");
+	assert.equal(visibleWidth(addedLine), 60, `expected rendered line width 60: ${JSON.stringify(addedLine)}`);
+
+	const visibleCells = collectVisibleBackgrounds(addedLine);
+	const lastNonSpaceIndex = visibleCells.findLastIndex((cell) => cell.char.trim().length > 0);
+	assert.ok(lastNonSpaceIndex >= 0, `expected at least one non-space cell: ${JSON.stringify(addedLine)}`);
+	const trailingCells = visibleCells.slice(lastNonSpaceIndex + 1);
+	assert.ok(trailingCells.length > 0, `expected trailing padding after the visible text: ${JSON.stringify(addedLine)}`);
+	assert.ok(
+		trailingCells.every((cell) => cell.char === " "),
+		`expected trailing cells to be spaces only: ${JSON.stringify(visibleCells.slice(Math.max(0, lastNonSpaceIndex - 4)))}`,
+	);
+	assert.ok(
+		trailingCells.every((cell) => cell.background === palette.addRowBg),
+		`expected trailing padding to keep the row background active: ${JSON.stringify(trailingCells)}`,
+	);
 });
 
 test("inline emphasis backgrounds remain visible while row backgrounds still recover after resets", () => {
